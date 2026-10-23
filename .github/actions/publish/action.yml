@@ -1,0 +1,41 @@
+name: Publish
+description: Push tested image references to GHCR and Forgejo
+
+inputs:
+  forgejo-registry-token:
+    description: Forgejo token with package write permission
+    required: true
+  github-token:
+    description: GitHub token with packages write permission
+    required: true
+  refs:
+    description: Newline-separated image references built and tested in this job
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Login to Forgejo
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        registry: forgejo.treyturner.info
+        username: treyturner
+        password: ${{ inputs.forgejo-registry-token }}
+
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        registry: ghcr.io
+        username: treyturner
+        password: ${{ inputs.github-token }}
+
+    - name: Push tested images
+      shell: bash -euo pipefail {0}
+      env:
+        REFS: ${{ inputs.refs }}
+      run: |
+        while IFS= read -r ref; do
+          [[ -z "$ref" ]] && continue
+          docker push "$ref"
+          printf 'Published `%s`\n' "$ref" >> "$GITHUB_STEP_SUMMARY"
+        done <<< "$REFS"

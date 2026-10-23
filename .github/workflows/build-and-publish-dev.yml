@@ -1,0 +1,56 @@
+name: Build and publish dev
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker-entrypoint.sh
+      - compose.yaml
+      - 'patches/**'
+      - 'tests/**'
+      - '.github/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-and-publish-dev
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish-dev:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate Compose and entrypoint
+        shell: bash -euo pipefail {0}
+        run: |
+          docker compose config --quiet
+          sh -n docker-entrypoint.sh
+
+      - name: Build and test
+        id: build
+        uses: ./.github/actions/build
+        with:
+          label: dev
+          repos: |
+            ghcr.io/treyturner/discordinator
+            forgejo.treyturner.info/treyturner/discordinator
+
+      - name: Publish
+        uses: ./.github/actions/publish
+        with:
+          forgejo-registry-token: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
+          github-token: ${{ github.token }}
+          refs: ${{ steps.build.outputs.refs }}

@@ -1,0 +1,61 @@
+--- a/src/core/config.ts
++++ b/src/core/config.ts
+@@ -186,7 +186,7 @@
+         .refine((value) => !value.startsWith('replace-')),
+     DISCORDINATOR_POLICY_FILE: z.string().default('policy.json'),
+     DISCORDINATOR_PORT: z.coerce.number().int().min(1024).max(65535).default(8787),
+-    DISCORDINATOR_BIND_HOST: z.literal('127.0.0.1').default('127.0.0.1'),
++    DISCORDINATOR_BIND_HOST: z.union([z.ipv4(), z.ipv6()]).default('127.0.0.1'),
+     DISCORDINATOR_AUTH_MODE: z.enum(['bearer', 'oauth']).default('bearer'),
+     DISCORDINATOR_MCP_TOKEN: z.string().optional(),
+     DISCORDINATOR_RESOURCE_URL: resourceUrl,
+--- a/src/mcp/http.ts
++++ b/src/mcp/http.ts
+@@ -194,7 +194,7 @@
+     async start(): Promise<void> {
+         await new Promise<void>((resolve, reject) => {
+             this.server.once('error', reject);
+-            this.server.listen(this.config.DISCORDINATOR_PORT, '127.0.0.1', () => {
++            this.server.listen(this.config.DISCORDINATOR_PORT, this.config.DISCORDINATOR_BIND_HOST, () => {
+                 this.server.off('error', reject);
+                 resolve();
+             });
+--- a/src/reconfigure.ts
++++ b/src/reconfigure.ts
+@@ -6,6 +6,7 @@
+ 
+ const gatewayKeys: (keyof Config)[] = ['DISCORD_BOT_TOKEN', 'DISCORDINATOR_MESSAGE_CONTENT', 'DISCORDINATOR_GUILD_MEMBERS'];
+ const listenerKeys: (keyof Config)[] = [
++    'DISCORDINATOR_BIND_HOST',
+     'DISCORDINATOR_PORT',
+     'DISCORDINATOR_AUTH_MODE',
+     'DISCORDINATOR_RESOURCE_URL',
+--- a/src/operator/settings-environment.ts
++++ b/src/operator/settings-environment.ts
+@@ -30,7 +30,7 @@
+         {
+             path: 'DISCORDINATOR_BIND_HOST',
+             label: 'Listener address',
+-            description: 'Loopback binding is an enforced boundary.',
++            description: 'Listener IP address; configure DISCORDINATOR_BIND_HOST in the environment.',
+             kind: 'text',
+             defaultValue: '127.0.0.1',
+             readOnly: true,
+--- a/scripts/check-connection.ts
++++ b/scripts/check-connection.ts
+@@ -53,10 +53,12 @@
+         (await loadConfig({ ...bearer, DISCORDINATOR_PORT: '8788' })).config.DISCORDINATOR_RESOURCE_URL,
+         'http://127.0.0.1:8788/mcp',
+     );
++    for (const host of ['0.0.0.0', '::', '192.168.1.2'])
++        assert.equal((await loadConfig({ ...bearer, DISCORDINATOR_BIND_HOST: host })).config.DISCORDINATOR_BIND_HOST, host);
+     for (const invalid of [
+-        { DISCORDINATOR_BIND_HOST: '0.0.0.0' },
+-        { DISCORDINATOR_BIND_HOST: '::' },
+-        { DISCORDINATOR_BIND_HOST: '192.168.1.2' },
++        { DISCORDINATOR_BIND_HOST: 'not-an-address' },
++        { DISCORDINATOR_BIND_HOST: '256.0.0.1' },
++        { DISCORDINATOR_BIND_HOST: '' },
+         { DISCORDINATOR_AUTH_MODE: 'tunnel' },
+         { DISCORDINATOR_AUTH_MODE: 'unsupported-provider-mode' },
+         { DISCORDINATOR_PORT: '1023' },

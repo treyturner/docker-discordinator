@@ -1,0 +1,85 @@
+name: Promote dev image
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: Upstream version to promote (for example 2.0.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Validate upstream version
+        shell: bash -euo pipefail {0}
+        env:
+          UPSTREAM_VERSION: ${{ inputs.upstream_version }}
+        run: |
+          if [[ ! "$UPSTREAM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+([.-][a-zA-Z0-9]+)*)?$ || ${#UPSTREAM_VERSION} -gt 124 ]]; then
+            echo '::error::Provide a Docker-compatible upstream version such as 2.0.0'
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          driver: docker-container
+
+      - name: Forgejo login
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: forgejo.treyturner.info
+          username: treyturner
+          password: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
+
+      - name: GitHub Container Registry login
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: treyturner
+          password: ${{ github.token }}
+
+      - name: Promote tested image without rebuilding
+        shell: bash -euo pipefail {0}
+        env:
+          UPSTREAM_VERSION: ${{ inputs.upstream_version }}
+        run: |
+          source_tag="${UPSTREAM_VERSION}-dev"
+          repos=(
+            ghcr.io/treyturner/discordinator
+            forgejo.treyturner.info/treyturner/discordinator
+          )
+          digests=()
+          for repo in "${repos[@]}"; do
+            digest="$(docker buildx imagetools inspect "${repo}:${source_tag}" --format '{{.Manifest.Digest}}')"
+            if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+              echo "::error::Invalid manifest digest for $repo"
+              exit 1
+            fi
+            digests+=("$digest")
+          done
+          if [[ "${digests[0]}" != "${digests[1]}" ]]; then
+            echo '::error::Registries contain different images; rerun the publish workflow before promoting'
+            exit 1
+          fi
+          for i in "${!repos[@]}"; do
+            repo="${repos[$i]}"
+            docker buildx imagetools create \
+              --tag "${repo}:${UPSTREAM_VERSION}" --tag "${repo}:latest" \
+              "${repo}@${digests[$i]}"
+            printf 'Promoted `%s@%s` to `%s:%s` and `%s:latest`\n' \
+              "$repo" "${digests[$i]}" "$repo" "$UPSTREAM_VERSION" "$repo" >> "$GITHUB_STEP_SUMMARY"
+          done

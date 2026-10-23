@@ -1,0 +1,40 @@
+name: Build and test PR
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker-entrypoint.sh
+      - compose.yaml
+      - 'patches/**'
+      - 'tests/**'
+      - '.github/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build-pr:
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate Compose and entrypoint
+        shell: bash -euo pipefail {0}
+        run: |
+          docker compose config --quiet
+          sh -n docker-entrypoint.sh
+
+      - name: Build and test
+        uses: ./.github/actions/build
+        with:
+          label: pr-${{ github.event.pull_request.number }}

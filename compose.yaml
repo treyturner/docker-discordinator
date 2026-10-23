@@ -1,0 +1,23 @@
+services:
+  discordinator:
+    build: .
+    image: discordinator:local
+    command: run
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - discordinator-data:/data
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  setup:
+    image: discordinator:local
+    command: setup
+    volumes:
+      - discordinator-data:/data
+    stdin_open: true
+    tty: true
+    profiles: [tools]
+
+volumes:
+  discordinator-data:

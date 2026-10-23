@@ -1,0 +1,99 @@
+name: Build
+description: Build and load a Discordinator image for testing before publishing
+
+inputs:
+  label:
+    description: Optional tag suffix such as dev or pr-123
+    required: false
+  repos:
+    description: Newline-separated registry/repository names
+    required: false
+    default: local/discordinator
+
+outputs:
+  refs:
+    description: Newline-separated built image references
+    value: ${{ steps.refs.outputs.refs }}
+  primary-ref:
+    description: First built image reference
+    value: ${{ steps.refs.outputs.primary-ref }}
+  version:
+    description: Upstream package version resolved from the built image
+    value: ${{ steps.refs.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      with:
+        driver: docker-container
+
+    - name: Build image
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      with:
+        context: .
+        file: Dockerfile
+        platforms: linux/amd64
+        pull: true
+        no-cache: true
+        push: false
+        load: true
+        tags: local/discordinator:build
+        labels: |
+          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          org.opencontainers.image.revision=${{ github.sha }}
+
+    - name: Test bind patch and authentication
+      shell: bash -euo pipefail {0}
+      env:
+        IMAGE: local/discordinator:build
+      run: |
+        docker run --rm \
+          --mount "type=bind,src=$GITHUB_WORKSPACE/tests/bind-host.mjs,dst=/tmp/bind-host.mjs,readonly" \
+          "$IMAGE" node /tmp/bind-host.mjs
+
+    - name: Check responder CLIs
+      shell: bash -euo pipefail {0}
+      env:
+        IMAGE: local/discordinator:build
+      run: |
+        docker run --rm "$IMAGE" sh -c 'node --version && codex --version && claude --version'
+
+    - name: Compute image references
+      id: refs
+      shell: bash -euo pipefail {0}
+      env:
+        LABEL: ${{ inputs.label }}
+        REPOS: ${{ inputs.repos }}
+      run: |
+        version="$(docker run --rm local/discordinator:build node --input-type=commonjs -p 'require("./package.json").version')"
+        if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+([.-][a-zA-Z0-9]+)*)?$ ]]; then
+          echo '::error::Upstream package version must be a Docker-compatible semantic version'
+          exit 1
+        fi
+        tag="${version}${LABEL:+-$LABEL}"
+        if [[ ! "$tag" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]]; then
+          echo '::error::Invalid image tag'
+          exit 1
+        fi
+        refs=()
+        while IFS= read -r repo; do
+          repo="${repo%$'\r'}"
+          [[ -z "$repo" ]] && continue
+          refs+=("${repo}:${tag}")
+        done <<< "$REPOS"
+        if ((${#refs[@]} == 0)); then
+          echo '::error::At least one image repository is required'
+          exit 1
+        fi
+        for ref in "${refs[@]}"; do docker tag local/discordinator:build "$ref"; done
+        printf 'Upstream version: `%s`\nImage tag: `%s`\n' "$version" "$tag" >> "$GITHUB_STEP_SUMMARY"
+        {
+          printf 'version=%s\n' "$version"
+          printf 'primary-ref=%s\n' "${refs[0]}"
+          printf 'refs<<EOF\n'
+          printf '%s\n' "${refs[@]}"
+          printf 'EOF\n'
+        } >> "$GITHUB_OUTPUT"
+

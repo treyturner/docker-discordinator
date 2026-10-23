@@ -1,0 +1,4 @@
+# GitHub supports this runner; actionlint 1.7.12's bundled label list predates it.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

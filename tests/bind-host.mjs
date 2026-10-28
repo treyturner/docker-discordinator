@@ -1,6 +1,6 @@
 // Run in the built image; no Discord credentials or external services needed.
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request } from 'node:http';
@@ -9,6 +9,20 @@ import { HttpServer } from '/opt/discordinator/dist/src/mcp/http.js';
 import { reconfigure } from '/opt/discordinator/dist/src/reconfigure.js';
 import { fakeConfig, fixture } from '/opt/discordinator/dist/scripts/fixtures.js';
 import { checkConnection } from '/opt/discordinator/dist/scripts/check-connection.js';
+import { checkStartup } from '/opt/discordinator/dist/scripts/check-startup.js';
+import { listenerUrl, localListenerUrl } from '/opt/discordinator/dist/src/core/listener-address.js';
+import { localCall, localEndpoint } from '/opt/discordinator/dist/src/mcp/local-client.js';
+import { bridgeListening } from '/opt/discordinator/dist/src/operator/service-status.js';
+import { mcpAddresses } from '/opt/discordinator/dist/src/operator/connection-domain.js';
+
+for (const [host, destination] of [
+  ['0.0.0.0', '127.0.0.1'], ['127.0.0.2', '127.0.0.2'], ['::', '[::1]'], ['::1', '[::1]'],
+]) {
+  const environment = { DISCORDINATOR_BIND_HOST: host, DISCORDINATOR_PORT: 9000 };
+  assert.equal(listenerUrl(environment), `http://${host.includes(':') ? `[${host}]` : host}:9000`);
+  assert.equal(localListenerUrl(environment), `http://${destination}:9000`);
+  assert.ok(mcpAddresses(environment)[0].includes(`http://${destination}:9000/mcp`));
+}
 
 const bindSchema = envSchema.shape.DISCORDINATOR_BIND_HOST;
 assert.equal(bindSchema.parse(undefined), '127.0.0.1');
@@ -37,7 +51,7 @@ try {
     await new Promise(resolve => process.once('SIGTERM', resolve));
     await http.stop();
   } else {
-    for (const host of ['127.0.0.1', '0.0.0.0', '::1', '::']) {
+    for (const host of ['127.0.0.1', '127.0.0.2', '0.0.0.0', '::1', '::']) {
       const config = { ...fakeConfig(0), DISCORDINATOR_BIND_HOST: host };
       const http = new HttpServer(config, fixture(join(directory, `journal-${host}`)).bridge, () => ({}));
       try {
@@ -45,10 +59,9 @@ try {
         const address = http.server.address();
         assert.equal(address.address, host);
         config.DISCORDINATOR_PORT = address.port;
-        const client = host.includes(':') ? '[::1]' : '127.0.0.1';
+        const base = localListenerUrl(config);
         const status = await new Promise((resolve, reject) => {
-          const outgoing = request(`http://${client}:${address.port}/mcp`,
-            { headers: { Host: `127.0.0.1:${address.port}` } },
+          const outgoing = request(`${base}/mcp`,
             response => {
               response.resume();
               response.once('end', () => resolve(response.statusCode));
@@ -59,12 +72,39 @@ try {
           outgoing.end();
         });
         assert.equal(status, 401);
+        // Exercise real local-key requests using the configured address, including IPv6.
+        const key = 'synthetic-local-key-for-bind-regression-test-only';
+        http.attachLocal(key);
+        const home = join(directory, `home-${host}`);
+        await mkdir(join(home, '.data'), { recursive: true });
+        await writeFile(join(home, '.data/local.key'), key);
+        await writeFile(join(home, '.env'), `DISCORDINATOR_BIND_HOST=${host}\nDISCORDINATOR_PORT=${address.port}\n`);
+        const savedHost = process.env.DISCORDINATOR_BIND_HOST;
+        const savedPort = process.env.DISCORDINATOR_PORT;
+        try {
+          delete process.env.DISCORDINATOR_BIND_HOST;
+          delete process.env.DISCORDINATOR_PORT;
+          const endpoint = await localEndpoint(home);
+          assert.equal(endpoint.base, base, 'local client uses the configured interface from .env');
+          assert.ok((await localCall(endpoint, 'tools/list')).tools.length > 0);
+          process.env.DISCORDINATOR_BIND_HOST = host;
+          process.env.DISCORDINATOR_PORT = String(address.port);
+          assert.equal(await bridgeListening(), true, 'service probe reaches the configured interface');
+          process.env.DISCORDINATOR_BIND_HOST = '127.0.0.3';
+          assert.equal((await localEndpoint(home)).base, `http://127.0.0.3:${address.port}`);
+        } finally {
+          if (savedHost === undefined) delete process.env.DISCORDINATOR_BIND_HOST;
+          else process.env.DISCORDINATOR_BIND_HOST = savedHost;
+          if (savedPort === undefined) delete process.env.DISCORDINATOR_PORT;
+          else process.env.DISCORDINATOR_PORT = savedPort;
+        }
       } finally {
         await http.stop();
       }
     }
     await checkConnection(directory);
-    console.log('Passed: bind validation, IPv4/IPv6 listeners, listener reload, and upstream connection/auth checks');
+    await checkStartup(directory);
+    console.log('Passed: interface URLs, local clients/probes, IPv4/IPv6 listeners, startup/reload logs, and connection/auth checks');
   }
 } finally {
     await rm(directory, { recursive: true, force: true });

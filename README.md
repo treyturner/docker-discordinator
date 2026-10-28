@@ -49,6 +49,11 @@ install and update actions; rebuild the image to update the container.
 The build applies [configurable-bind-host.patch](patches/configurable-bind-host.patch)
 before compiling upstream. It validates IPv4/IPv6 addresses, makes the HTTP server
 use `DISCORDINATOR_BIND_HOST`, and restarts the listener when that setting changes.
+Startup and reload logs report that bind address, including bracketed IPv6 URLs.
+Local MCP clients, service probes and setup connection hints follow the configured
+interface. They connect through `127.0.0.1` for `0.0.0.0`, through `::1` for `::`,
+and directly to a specific configured address. Local-key authentication still
+requires the private key; public Host/Origin allowlists still apply.
 The patch preserves upstream's loopback default; the image sets
 `DISCORDINATOR_BIND_HOST=0.0.0.0` so Docker can publish the listener. Override it
 with `docker run -e DISCORDINATOR_BIND_HOST=...` or a Compose `environment` entry.
@@ -101,8 +106,9 @@ docker run --rm -v "$PWD/tests/bind-host.mjs:/tmp/bind-host.mjs:ro" \
   discordinator:local node /tmp/bind-host.mjs
 ```
 
-This checks address validation, actual IPv4/IPv6 listeners, listener reload and
-upstream connection/authentication behavior without real Discord credentials.
+This checks address validation, actual IPv4/IPv6 listeners, local client and
+service-probe connections, startup/reload logs and upstream connection/authentication
+behavior without real Discord credentials.
 The build fails if the patch no longer applies to a selected upstream ref.
 
 ## Build and publish pipeline

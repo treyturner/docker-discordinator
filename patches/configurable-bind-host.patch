@@ -1,46 +1,3 @@
---- a/src/core/config.ts
-+++ b/src/core/config.ts
-@@ -186,7 +186,7 @@
-         .refine((value) => !value.startsWith('replace-')),
-     DISCORDINATOR_POLICY_FILE: z.string().default('policy.json'),
-     DISCORDINATOR_PORT: z.coerce.number().int().min(1024).max(65535).default(8787),
--    DISCORDINATOR_BIND_HOST: z.literal('127.0.0.1').default('127.0.0.1'),
-+    DISCORDINATOR_BIND_HOST: z.union([z.ipv4(), z.ipv6()]).default('127.0.0.1'),
-     DISCORDINATOR_AUTH_MODE: z.enum(['bearer', 'oauth']).default('bearer'),
-     DISCORDINATOR_MCP_TOKEN: z.string().optional(),
-     DISCORDINATOR_RESOURCE_URL: resourceUrl,
---- a/src/mcp/http.ts
-+++ b/src/mcp/http.ts
-@@ -194,7 +194,7 @@
-     async start(): Promise<void> {
-         await new Promise<void>((resolve, reject) => {
-             this.server.once('error', reject);
--            this.server.listen(this.config.DISCORDINATOR_PORT, '127.0.0.1', () => {
-+            this.server.listen(this.config.DISCORDINATOR_PORT, this.config.DISCORDINATOR_BIND_HOST, () => {
-                 this.server.off('error', reject);
-                 resolve();
-             });
---- a/src/reconfigure.ts
-+++ b/src/reconfigure.ts
-@@ -6,6 +6,7 @@
- 
- const gatewayKeys: (keyof Config)[] = ['DISCORD_BOT_TOKEN', 'DISCORDINATOR_MESSAGE_CONTENT', 'DISCORDINATOR_GUILD_MEMBERS'];
- const listenerKeys: (keyof Config)[] = [
-+    'DISCORDINATOR_BIND_HOST',
-     'DISCORDINATOR_PORT',
-     'DISCORDINATOR_AUTH_MODE',
-     'DISCORDINATOR_RESOURCE_URL',
---- a/src/operator/settings-environment.ts
-+++ b/src/operator/settings-environment.ts
-@@ -30,7 +30,7 @@
-         {
-             path: 'DISCORDINATOR_BIND_HOST',
-             label: 'Listener address',
--            description: 'Loopback binding is an enforced boundary.',
-+            description: 'Listener IP address; configure DISCORDINATOR_BIND_HOST in the environment.',
-             kind: 'text',
-             defaultValue: '127.0.0.1',
-             readOnly: true,
 --- a/scripts/check-connection.ts
 +++ b/scripts/check-connection.ts
 @@ -53,10 +53,12 @@
@@ -59,3 +16,265 @@
          { DISCORDINATOR_AUTH_MODE: 'tunnel' },
          { DISCORDINATOR_AUTH_MODE: 'unsupported-provider-mode' },
          { DISCORDINATOR_PORT: '1023' },
+--- a/scripts/check-startup.ts
++++ b/scripts/check-startup.ts
+@@ -182,11 +182,11 @@
+ async function checkRunning(root: string): Promise<void> {
+     await prepared(root, 'running', async () => {
+         const port = await freePort();
+-        await writeFile('.env', `DOTBOT_PORT=${port}\n`);
++        await writeFile('.env', `DOTBOT_PORT=${port}\nDISCORDINATOR_BIND_HOST=0.0.0.0\n`);
+         const env = settings(port);
+         delete env.DISCORDINATOR_PORT;
+         const started = await start(env);
+-        assert.deepEqual(started.lines, [`Discordinator MCP listening on http://127.0.0.1:${port}/mcp`], 'a renamed setting is applied');
++        assert.deepEqual(started.lines, [`Discordinator MCP listening on http://0.0.0.0:${port}/mcp`], 'a renamed setting is applied');
+         assert.equal(started.host.exitCode, undefined);
+         assert.equal(existsSync(lockFile), true);
+         const endpoint = { base: `http://127.0.0.1:${port}`, key: (await readFile(join('.data', 'local.key'), 'utf8')).trim() };
+@@ -242,7 +242,7 @@
+         const lines = await captured(async () => {
+             await writeFile(
+                 '.env',
+-                `DISCORDINATOR_PORT=${moved}\nDISCORD_BOT_TOKEN=another-fake-token\nGEMINI_API_KEY=gemini-fixture-key\n`,
++                `DISCORDINATOR_PORT=${moved}\nDISCORDINATOR_BIND_HOST=0.0.0.0\nDISCORD_BOT_TOKEN=another-fake-token\nGEMINI_API_KEY=gemini-fixture-key\n`,
+             );
+             await until(() => started.gateway !== first && first.stopped === 1, 15_000);
+             assert.ok(await eventually(() => reachable(moved)), 'the listener moved to the new port without a restart');
+@@ -257,7 +257,7 @@
+             ),
+             lines.join('\n'),
+         );
+-        assert.ok(lines.includes(`Discordinator MCP listening on http://127.0.0.1:${moved}/mcp`));
++        assert.ok(lines.includes(`Discordinator MCP listening on http://0.0.0.0:${moved}/mcp`));
+         assert.ok(
+             lines.some((line) => line.includes('.env changed but could not be applied')),
+             'an invalid edit is ignored',
+--- a/src/core/config.ts
++++ b/src/core/config.ts
+@@ -186,7 +186,7 @@
+         .refine((value) => !value.startsWith('replace-')),
+     DISCORDINATOR_POLICY_FILE: z.string().default('policy.json'),
+     DISCORDINATOR_PORT: z.coerce.number().int().min(1024).max(65535).default(8787),
+-    DISCORDINATOR_BIND_HOST: z.literal('127.0.0.1').default('127.0.0.1'),
++    DISCORDINATOR_BIND_HOST: z.union([z.ipv4(), z.ipv6()]).default('127.0.0.1'),
+     DISCORDINATOR_AUTH_MODE: z.enum(['bearer', 'oauth']).default('bearer'),
+     DISCORDINATOR_MCP_TOKEN: z.string().optional(),
+     DISCORDINATOR_RESOURCE_URL: resourceUrl,
+--- /dev/null
++++ b/src/core/listener-address.ts
+@@ -0,0 +1,21 @@
++import { scalar } from './text.js';
++
++/** Keep wildcard bind addresses separate from addresses local clients can connect to. */
++export function localListenerHost(value: unknown): string {
++    const host = scalar(value) || '127.0.0.1';
++    if (host === '0.0.0.0') return '127.0.0.1';
++    if (host === '::') return '::1';
++    return host;
++}
++
++function httpAddress(host: string, port: unknown): string {
++    return `http://${host.includes(':') ? `[${host}]` : host}:${scalar(port) || '8787'}`;
++}
++
++export function listenerUrl(environment: Record<string, unknown>): string {
++    return httpAddress(scalar(environment.DISCORDINATOR_BIND_HOST) || '127.0.0.1', environment.DISCORDINATOR_PORT);
++}
++
++export function localListenerUrl(environment: Record<string, unknown>): string {
++    return httpAddress(localListenerHost(environment.DISCORDINATOR_BIND_HOST), environment.DISCORDINATOR_PORT);
++}
+--- a/src/mcp/auth.ts
++++ b/src/mcp/auth.ts
+@@ -56,7 +56,7 @@
+
+     localRequest(request: IncomingMessage): boolean {
+         return (
+-            loopbackHost(request.headers.host, this.config.DISCORDINATOR_PORT) &&
++            loopbackHost(request.headers.host, this.config.DISCORDINATOR_PORT, this.config.DISCORDINATOR_BIND_HOST) &&
+             localKeyMatches(request.headers.authorization, this.localKey)
+         );
+     }
+--- a/src/mcp/http.ts
++++ b/src/mcp/http.ts
+@@ -1,3 +1,4 @@
++import { localListenerUrl } from '../core/listener-address.js';
+ import { createServer } from 'node:http';
+ import { once } from 'node:events';
+ import type { IncomingMessage, ServerResponse } from 'node:http';
+@@ -86,7 +87,11 @@
+
+     private validHeaders(request: IncomingMessage): boolean {
+         const host = request.headers.host;
+-        const defaults = [`127.0.0.1:${this.config.DISCORDINATOR_PORT}`, `localhost:${this.config.DISCORDINATOR_PORT}`];
++        const defaults = [
++            `127.0.0.1:${this.config.DISCORDINATOR_PORT}`,
++            `localhost:${this.config.DISCORDINATOR_PORT}`,
++            new URL(localListenerUrl(this.config)).host,
++        ];
+         const publicHosts = csv(this.config.DISCORDINATOR_ALLOWED_HOSTS)
+             .map((value) => httpsOrigin(`https://${value}`))
+             .filter((value) => value !== undefined);
+@@ -194,7 +199,7 @@
+     async start(): Promise<void> {
+         await new Promise<void>((resolve, reject) => {
+             this.server.once('error', reject);
+-            this.server.listen(this.config.DISCORDINATOR_PORT, '127.0.0.1', () => {
++            this.server.listen(this.config.DISCORDINATOR_PORT, this.config.DISCORDINATOR_BIND_HOST, () => {
+                 this.server.off('error', reject);
+                 resolve();
+             });
+--- a/src/mcp/local-client.ts
++++ b/src/mcp/local-client.ts
+@@ -1,3 +1,4 @@
++import { localListenerUrl } from '../core/listener-address.js';
+ import { readFile } from 'node:fs/promises';
+ import { join } from 'node:path';
+ import { parseEnv } from 'node:util';
+@@ -17,13 +18,13 @@
+
+ export async function localEndpoint(home = process.cwd()): Promise<LocalEndpoint> {
+     const environment = await readFile(join(home, '.env'), 'utf8').then(parseEnv, (): Record<string, string> => ({}));
+-    const port = process.env.DISCORDINATOR_PORT ?? environment.DISCORDINATOR_PORT ?? '8787';
++    const settings = { ...environment, ...process.env };
+     const key = (
+         await readFile(join(home, localKeyPath), 'utf8').catch(() => {
+             throw new Error('Discordinator has not created its local key yet. Restart Discordinator, then try again.');
+         })
+     ).trim();
+-    return { base: `http://127.0.0.1:${port}`, key };
++    return { base: localListenerUrl(settings), key };
+ }
+
+ export async function localCall(endpoint: LocalEndpoint, method: string, params: Record<string, unknown> = {}, timeoutMs = 120_000) {
+--- a/src/mcp/local-key.ts
++++ b/src/mcp/local-key.ts
+@@ -1,3 +1,4 @@
++import { localListenerUrl } from '../core/listener-address.js';
+ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+ import { mkdir, readFile, writeFile } from 'node:fs/promises';
+ import { dirname } from 'node:path';
+@@ -19,8 +20,9 @@
+     return key;
+ }
+
+-export function loopbackHost(host: string | undefined, port: number): boolean {
+-    return host === `127.0.0.1:${port}` || host === `localhost:${port}`;
++export function loopbackHost(host: string | undefined, port: number, bindHost = '127.0.0.1'): boolean {
++    const configured = new URL(localListenerUrl({ DISCORDINATOR_BIND_HOST: bindHost, DISCORDINATOR_PORT: port })).host;
++    return host === `127.0.0.1:${port}` || host === `localhost:${port}` || host === configured;
+ }
+
+ export function localKeyMatches(header: string | undefined, key: string | undefined): boolean {
+--- a/src/operator/connection-domain.ts
++++ b/src/operator/connection-domain.ts
+@@ -1,3 +1,4 @@
++import { localListenerUrl } from '../core/listener-address.js';
+ import { publicEndpoint } from './setup-model.js';
+ import { scalar } from '../core/text.js';
+
+@@ -53,7 +54,7 @@
+ export function mcpAddresses(environment: Record<string, unknown>): string[] {
+     const domain = publicDomain(environment.DISCORDINATOR_RESOURCE_URL);
+     return [
+-        `On this computer: http://127.0.0.1:${scalar(environment.DISCORDINATOR_PORT) || '8787'}/mcp, sending "Authorization: Bearer" with the key in .data/local.key.`,
++        `On this computer: ${localListenerUrl(environment)}/mcp, sending "Authorization: Bearer" with the key in .data/local.key.`,
+         domain
+             ? `From the web: https://${domain}/mcp, signing in with your Discordinator password.`
+             : 'From the web: set a public domain on the Apps page first.',
+--- a/src/operator/onboarding-copy.ts
++++ b/src/operator/onboarding-copy.ts
+@@ -1,3 +1,4 @@
++import { localListenerUrl } from '../core/listener-address.js';
+ import { verifyLines, type Check } from './onboarding-verify.js';
+ import { inviteCopy, inviteReady, ownerMatches } from './onboarding-invite.js';
+ import { appNames, responderApps } from './connections.js';
+@@ -128,7 +129,7 @@
+             title: 'Your public domain',
+             body: [
+                 'Just the domain ChatGPT reaches Discordinator on, like bot.example.com. No https:// and no path.',
+-                `Point it (Cloudflare Tunnel or a reverse proxy) at http://127.0.0.1:${process.env.DISCORDINATOR_PORT ?? '8787'}, the port Discordinator listens on.`,
++                `Point it (Cloudflare Tunnel or a reverse proxy) at ${localListenerUrl(process.env)}, the port Discordinator listens on.`,
+             ],
+         }),
+         invite: () => inviteCopy(state.discovery),
+--- a/src/operator/service-status.ts
++++ b/src/operator/service-status.ts
+@@ -1,3 +1,4 @@
++import { localListenerHost } from '../core/listener-address.js';
+ import { createConnection } from 'node:net';
+ import { homedir } from 'node:os';
+ import { macServiceStatus } from './mac-service.js';
+@@ -45,7 +46,7 @@
+ }
+ export async function bridgeListening(): Promise<boolean> {
+     return new Promise((resolve) => {
+-        const socket = createConnection({ host: '127.0.0.1', port: Number(process.env.DISCORDINATOR_PORT ?? 8787) });
++        const socket = createConnection({ host: localListenerHost(process.env.DISCORDINATOR_BIND_HOST), port: Number(process.env.DISCORDINATOR_PORT ?? 8787) });
+         const finish = (listening: boolean) => {
+             socket.destroy();
+             resolve(listening);
+--- a/src/operator/settings-environment.ts
++++ b/src/operator/settings-environment.ts
+@@ -30,7 +30,7 @@
+         {
+             path: 'DISCORDINATOR_BIND_HOST',
+             label: 'Listener address',
+-            description: 'Loopback binding is an enforced boundary.',
++            description: 'Listener IP address; configure DISCORDINATOR_BIND_HOST in the environment.',
+             kind: 'text',
+             defaultValue: '127.0.0.1',
+             readOnly: true,
+--- a/src/operator/ui/pages/apps.ts
++++ b/src/operator/ui/pages/apps.ts
+@@ -1,4 +1,4 @@
+-import { scalar } from '../../../core/text.js';
++import { localListenerUrl } from '../../../core/listener-address.js';
+ import { publicDomain } from '../../connection-domain.js';
+ import { connectorStatus, webHint, type WebId } from '../../web-connectors.js';
+ import { line, span } from '../canvas.js';
+@@ -32,7 +32,7 @@
+         ...section('address', 'Your public address', 'Optional · for web connectors', [
+             note(
+                 'address-port',
+-                `Point your domain (Cloudflare Tunnel or a reverse proxy) at http://127.0.0.1:${scalar(view.drafts.environment.DISCORDINATOR_PORT) || '8787'}.`,
++                `Point your domain (Cloudflare Tunnel or a reverse proxy) at ${localListenerUrl(view.drafts.environment)}.`,
+             ),
+             settingItem('environment.DISCORDINATOR_RESOURCE_URL', 'Public domain'),
+             actionItem('sign-in-password', 'Sign-in password', { type: 'run', action: 'sign-in-password' }, 'Set or change it'),
+--- a/src/reconfigure.ts
++++ b/src/reconfigure.ts
+@@ -6,6 +6,7 @@
+
+ const gatewayKeys: (keyof Config)[] = ['DISCORD_BOT_TOKEN', 'DISCORDINATOR_MESSAGE_CONTENT', 'DISCORDINATOR_GUILD_MEMBERS'];
+ const listenerKeys: (keyof Config)[] = [
++    'DISCORDINATOR_BIND_HOST',
+     'DISCORDINATOR_PORT',
+     'DISCORDINATOR_AUTH_MODE',
+     'DISCORDINATOR_RESOURCE_URL',
+--- a/src/startup.ts
++++ b/src/startup.ts
+@@ -1,3 +1,4 @@
++import { listenerUrl } from './core/listener-address.js';
+ import { loadConfig, type Config, type PolicyConfig } from './core/config.js';
+ import { PresenceWriter } from './operator/presence.js';
+ import { StatusWriter } from './operator/status-file.js';
+@@ -121,7 +122,7 @@
+                 (stamp) => settingsFailed(runtime, stamp, 'the saved settings are not valid'),
+             ),
+         );
+-        console.log(`Discordinator MCP listening on http://127.0.0.1:${config.DISCORDINATOR_PORT}/mcp`);
++        console.log(`Discordinator MCP listening on ${listenerUrl(config)}/mcp`);
+     } catch (error) {
+         failure('Discordinator startup failed', stage, error);
+         await stop();
+@@ -253,7 +254,7 @@
+             runtime.access.auth = new Authenticator(config, runtime.oauth?.verifyKey);
+             runtime.http = runtime.listen();
+             await runtime.http.start();
+-            console.log(`Discordinator MCP listening on http://127.0.0.1:${config.DISCORDINATOR_PORT}/mcp`);
++            console.log(`Discordinator MCP listening on ${listenerUrl(config)}/mcp`);
+         },
+         reconnectGateway: async () => {
+             runtime.api.setToken?.(config.DISCORD_BOT_TOKEN);

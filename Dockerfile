@@ -38,8 +38,8 @@ ENV HOME=/data/home \
     DISCORDINATOR_APP_HOME=/data/app \
     DISCORDINATOR_BIND_HOST=0.0.0.0
 EXPOSE 8787
-WORKDIR /data/app
 USER node
+WORKDIR /data/app
 VOLUME ["/data"]
 ENTRYPOINT ["/sbin/tini", "-g", "--", "docker-entrypoint.sh"]
 CMD ["run"]
